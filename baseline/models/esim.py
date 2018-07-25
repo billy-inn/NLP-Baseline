@@ -53,16 +53,18 @@ class ESIM(object):
     Enhanced Sequential Inference Model
     """
 
-    def __init__(self, num_classes, vocab_size, embedding_size, seq_len,
-                 word_embeddings, hparams):
+    def __init__(self, num_classes, seq_len, word_embeddings, hparams):
         self.num_classes = num_classes
-        self.vocab_size = vocab_size
-        self.embedding_size = embedding_size
         self.seq_len = seq_len
         self.num_units = hparams["num_units"]
+        self.input_dropout = hparams["input_dropout"]
+        self.output_dropout = hparams["output_dropout"]
+        self.state_dropout = hparams["state_dropout"]
         self.hidden_layers = hparams["hidden_layers"]
         self.hidden_units = hparams["hidden_units"]
+        self.hidden_dropout = hparams["hidden_dropout"]
         self.lr = hparams["lr"]
+        self.l2_reg_lambda = hparams["l2_reg_lambda"]
 
         self.batch_size = hparams["batch_size"]
         self.num_epochs = hparams["num_epochs"]
@@ -73,6 +75,10 @@ class ESIM(object):
         self.sent1_len = tf.placeholder(tf.int32, [None], 'sent1_len')
         self.sent2_len = tf.placeholder(tf.int32, [None], 'sent2_len')
         self.labels = tf.placeholder(tf.int32, [None], 'label')
+        self.input_dropout_ph = tf.placeholder(tf.float32, [], 'input_dropout')
+        self.output_dropout_ph = tf.placeholder(tf.float32, [], 'output_dropout')
+        self.state_dropout_ph = tf.placeholder(tf.float32, [], 'state_dropout')
+        self.hidden_dropout_ph = tf.placeholder(tf.float32, [], 'hidden_dropout')
 
         with tf.device('/cpu:0'), tf.name_scope("word_embedding"):
             W = tf.Variable(word_embeddings, trainable=False, dtype=tf.float32, name="W")
@@ -92,7 +98,12 @@ class ESIM(object):
 
         cross_entropy = tf.nn.sparse_softmax_cross_entropy_with_logits(
             logits=self.logits, labels=self.labels)
-        self.loss = tf.reduce_mean(cross_entropy)
+        weights = [v for v in tf.trainable_variables()
+                   if 'weight' in v.name]
+        l2_loss = tf.contrib.layers.apply_regularization(
+            regularizer=tf.contrib.layers.l2_regularizer(self.l2_reg_lambda),
+            weights_list=weights)
+        self.loss = tf.add(tf.reduce_mean(cross_entropy), l2_loss, "loss")
 
         optimizer = tf.train.AdamOptimizer(self.lr)
         self.grads_and_vars = optimizer.compute_gradients(self.loss)
@@ -202,6 +213,7 @@ class ESIM(object):
             for i, hidden_unit in enumerate(hidden_units):
                 with tf.variable_scope('layer%d' % i):
                     outputs = tf.layers.dense(outputs, hidden_unit, tf.nn.relu)
+                    outputs = tf.nn.dropout(outputs, self.hidden_dropout_ph)
         return outputs
 
     def _apply_lstm(self, inputs, length, scope=None, reuse_weights=False):
@@ -216,10 +228,19 @@ class ESIM(object):
         """
         scope_name = scope or 'lstm'
         initializer = tf.contrib.layers.xavier_initializer()
-        lstm = tf.nn.rnn_cell.LSTMCell(self.num_units, initializer=initializer)
 
         with tf.variable_scope(scope_name, reuse=reuse_weights) as lstm_scope:
-            outputs, _ = tf.nn.bidirectional_dynamic_rnn(lstm, lstm, inputs,
+            fw_lstm = tf.nn.rnn_cell.LSTMCell(self.num_units, initializer=initializer)
+            bw_lstm = tf.nn.rnn_cell.LSTMCell(self.num_units, initializer=initializer)
+            fw_lstm = tf.nn.rnn_cell.DropoutWrapper(fw_lstm,
+                                                    self.input_dropout_ph,
+                                                    self.output_dropout_ph,
+                                                    self.state_dropout_ph)
+            bw_lstm = tf.nn.rnn_cell.DropoutWrapper(bw_lstm,
+                                                    self.input_dropout_ph,
+                                                    self.output_dropout_ph,
+                                                    self.state_dropout_ph)
+            outputs, _ = tf.nn.bidirectional_dynamic_rnn(fw_lstm, bw_lstm, inputs,
                                                          dtype=tf.float32,
                                                          sequence_length=length,
                                                          scope=lstm_scope)
@@ -235,7 +256,9 @@ class ESIM(object):
         """
         sess.run(tf.global_variables_initializer())
 
-    def _create_feed_dict(self, sent1, sent2, sent1_len, sent2_len, labels=None):
+    def _create_feed_dict(self, sent1, sent2, sent1_len, sent2_len, labels=None,
+                          input_dropout=1.0, output_dropout=1.0,
+                          state_dropout=1.0, hidden_dropout=1.0):
         """
         Create feed dict for training.
         """
@@ -244,6 +267,10 @@ class ESIM(object):
             self.sent2: sent2,
             self.sent1_len: sent1_len,
             self.sent2_len: sent2_len,
+            self.input_dropout_ph: input_dropout,
+            self.output_dropout_ph: output_dropout,
+            self.state_dropout_ph: state_dropout,
+            self.hidden_dropout_ph: hidden_dropout
         }
         if labels is not None:
             feed_dict[self.labels] = labels
@@ -265,7 +292,9 @@ class ESIM(object):
         best_epoch = 0
         for batch in train_batches:
             sent1, sent2, sent1_len, sent2_len, labels = zip(*batch)
-            feeds = self._create_feed_dict(sent1, sent2, sent1_len, sent2_len, labels)
+            feeds = self._create_feed_dict(sent1, sent2, sent1_len, sent2_len, labels,
+                                           self.input_dropout, self.output_dropout,
+                                           self.state_dropout, self.hidden_dropout)
             ops = [self.train_op, self.global_step, self.loss, self.accuracy]
             _, step, loss, acc = sess.run(ops, feed_dict=feeds)
             time_str = datetime.now().isoformat()

@@ -2,18 +2,20 @@ import json
 import logging
 import nltk
 
-def read_snli(filename, lowercase):
+def read_snli(filename, lowercase=True):
     """
     Read a JSONL file with the SNLI corpus
 
     :param filename: path to the file
     :param lowercase: whether to convert text to lower case
-    :return: a list of tuples (sent1, sent2, label)
+    :return: a tuple of lists (sent1, sent2, label)
     """
 
     logging.info('Reading SNLI data from %s' % filename)
 
-    useful_data = []
+    sent1 = []
+    sent2 = []
+    labels = []
     with open(filename, 'rb') as f:
         for line in f:
             line = line.decode('utf-8')
@@ -31,7 +33,9 @@ def read_snli(filename, lowercase):
             tree2 = nltk.Tree.fromstring(sent2_parse)
             tokens1 = tree1.leaves()
             tokens2 = tree2.leaves()
-            t = (tokens1, tokens2, label)
-            useful_data.append(t)
 
-    return useful_data
+            sent1.append(tokens1)
+            sent2.append(tokens2)
+            labels.append(label)
+
+    return sent1, sent2, labels
